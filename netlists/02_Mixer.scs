@@ -1,0 +1,218 @@
+// =============================================================================
+// FILE: 02_Mixer.scs
+// TITLE: 2.4 GHz Double-Balanced Gilbert Cell Mixer
+// PROCESS: Generic 180nm CMOS (substitute your PDK model path)
+// AUTHOR: RF RX Front-End Project
+//
+// TARGET SPECS:
+//   Conversion Gain (CG)  > 6 dB
+//   DSB Noise Figure      < 12 dB
+//   IIP3                  > +5 dBm (referred to RF input)
+//   LO-RF Isolation       > 30 dB
+//   IF Output Frequency   = 200 MHz (RF=2.4GHz, LO=2.2GHz)
+//   PDC                   < 15 mW at VDD=1.8V
+//
+// TOPOLOGY (Double-Balanced Gilbert Cell):
+//
+//        VDD
+//         |
+//    RL+ ─┤├─ RL-        ← Load resistors (IF output taken differentially)
+//    |           |
+//   IF+         IF-      ← Differential IF output at 200 MHz
+//    |    ┌─────┤
+//   M5───M3   M4───M6    ← LO switching quad
+//    └─────┤   ├─────┘
+//          |   |
+//         M1   M2        ← RF transconductance pair (gm stage)
+//          \   /
+//           ISS           ← Tail current source (sets operating point)
+//            |
+//           GND
+//
+// SIGNAL FLOW:
+//   RF input (diff) → M1,M2 converts V to I (Gm stage)
+//   LO switching quad M3-M6 commutates RF current at LO frequency
+//   IF output = RF current × LO square wave → mixing product at fRF-fLO
+// =============================================================================
+
+// ---- Model include (REPLACE with your PDK path) ----
+// include "/opt/pdk/tsmc180nm/models/spectre/tt.scs" section=tt
+// ----------------------------------------------------
+
+// ============================================================
+// GLOBAL PARAMETERS
+// ============================================================
+parameters
++ VDD     = 1.8        // Supply voltage (V)
++ fRF     = 2.4G       // RF input frequency (Hz)
++ fLO     = 2.2G       // LO frequency (Hz); IF = fRF - fLO = 200 MHz
++ fIF     = 200M       // IF output frequency
++ ISS_val = 4m         // Tail current (total); each M1/M2 carries ISS/2 = 2mA
++ RL_val  = 300        // Load resistance (Ω); higher RL → higher CG but lower bandwidth
++ W_rf    = 120u       // RF pair width (M1,M2); nf=24 × 5μm
++ W_lo    = 80u        // LO quad width (M3-M6); smaller for faster switching
++ W_tail  = 40u        // Tail current source width
++ L_mos   = 180n       // Channel length
++ NF_rf   = 24         // Fingers for RF pair
++ NF_lo   = 16         // Fingers for LO quad
++ Vbias_lo = 0.65      // LO quad bias (set M3-M6 at edge of saturation for fast switching)
++ Vbias_cs = 0.5       // Cascode/tail current source gate voltage
++ CLO_bp  = 10p        // LO bypass capacitor
++ Cbp     = 10p        // General bypass capacitor
++ LO_amp  = 400m       // LO drive amplitude (Vpeak, differential = 800mVpp)
+//   LO swing should be large enough to fully switch quad but not overdrive
+
+// ============================================================
+// SUBCIRCUIT DEFINITION
+// Ports:
+//   RFp, RFm  — Differential RF input (from LNA, 200Ω diff impedance typical)
+//   LOp, LOm  — Differential LO input (from PLL/LO buffer)
+//   IFp, IFm  — Differential IF output at 200 MHz → to IF filter
+//   VDD, GND  — Supply and ground
+// ============================================================
+subckt GilbertMixer (RFp RFm LOp LOm IFp IFm VDD GND)
+
+  // ---- Load resistors (IF output) ----
+  // Higher RL → higher CG. RL·CL sets IF bandwidth.
+  // CL ≈ Cgs of next stage (IF filter input) ≈ 100fF → BW = 1/(2π·RL·CL)
+  RL_p  (VDD  IFp)   resistor  r=RL_val
+  RL_m  (VDD  IFm)   resistor  r=RL_val
+
+  // ---- LO Switching Quad (M3, M4, M5, M6) ----
+  // M3, M4 are driven by LOp; M5, M6 by LOm
+  // When LOp > LOm: M3,M6 ON, M4,M5 OFF → positive half cycle
+  // When LOm > LOp: M4,M5 ON, M3,M6 OFF → negative half cycle
+  M3  (IFp  LOp  net_drain_m1  GND)  nmos  w=W_lo  l=L_mos  nf=NF_lo
+  M4  (IFm  LOm  net_drain_m1  GND)  nmos  w=W_lo  l=L_mos  nf=NF_lo
+  M5  (IFm  LOp  net_drain_m2  GND)  nmos  w=W_lo  l=L_mos  nf=NF_lo
+  M6  (IFp  LOm  net_drain_m2  GND)  nmos  w=W_lo  l=L_mos  nf=NF_lo
+
+  // ---- RF Transconductance Pair (M1, M2) ----
+  // Convert differential RF voltage to differential current
+  // Biased at ISS/2 each; Gm = gm1 = √(2·kn·W/L·ISS/2)
+  M1  (net_drain_m1  RFp  net_tail  GND)  nmos  w=W_rf  l=L_mos  nf=NF_rf
+  M2  (net_drain_m2  RFm  net_tail  GND)  nmos  w=W_rf  l=L_mos  nf=NF_rf
+
+  // ---- Tail Current Source ----
+  // NMOS current mirror; W_tail sets ISS
+  // Alternatively use ideal current source for initial simulation:
+  // ISS (net_tail GND) isource type=dc dc=ISS_val
+  Mtail  (net_tail  net_tail_bias  GND  GND)  nmos  w=W_tail  l=L_mos  nf=8
+  // Tail bias — connect to current mirror reference or voltage source
+  Vtail_bias  (net_tail_bias  GND)  vsource  type=dc  dc=Vbias_cs
+
+  // ---- Ideal tail current (use for initial convergence, then replace with Mtail) ----
+  // ISS_ideal (net_tail GND) isource type=dc dc=ISS_val
+
+  // ---- LO port bypass capacitors ----
+  CLO_p  (LOp  GND)  capacitor  c=CLO_bp
+  CLO_m  (LOm  GND)  capacitor  c=CLO_bp
+
+  // ---- VDD bypass ----
+  Cbp_vdd  (VDD  GND)  capacitor  c=Cbp
+
+ends GilbertMixer
+
+// ============================================================
+// TEST BENCH
+// ============================================================
+
+// Power supply
+Vsupply  (VDD GND)  vsource  type=dc  dc=VDD
+
+// ---- RF Input Source (single-ended → differential via ideal balun) ----
+// For small-signal S-param sims use port element
+// For PSS/IIP3 use sine source
+Vrf_p  (RFp GND)  vsource  type=sine  freq=fRF  amp=1m   // -47dBm small signal
+Vrf_m  (RFm GND)  vsource  type=sine  freq=fRF  amp=-1m  // differential (180° phase)
+// Note: for S-param simulation, replace with Port elements
+
+// ---- LO Source (differential, large drive) ----
+VLO_p  (LOp GND)  vsource  type=sine  freq=fLO  amp=LO_amp
+VLO_m  (LOm GND)  vsource  type=sine  freq=fLO  amp=-LO_amp
+
+// ---- IF Load (represents IF filter input impedance) ----
+Rload_p  (IFp GND)  resistor  r=1k
+Rload_m  (IFm GND)  resistor  r=1k
+
+// Instantiate mixer
+XMIX (RFp RFm LOp LOm IFp IFm VDD GND) GilbertMixer
+
+// ============================================================
+// SIMULATION 1: DC Operating Point
+// Verify all transistors in saturation:
+//   VGS_M1,M2 > Vth (≈0.5V), ID ≈ ISS/2 ≈ 2mA each
+//   VGS_M3-M6 at switching threshold
+//   VDS_all > VGS - Vth (in saturation)
+// Check total current from VDD ≈ 6-8mA (PDC < 15mW)
+// ============================================================
+DC_OP dc
+
+// ============================================================
+// SIMULATION 2: Conversion Gain (PSS Analysis)
+// PSS finds the periodic steady state driven by LO
+// Then small-signal RF analysis gives conversion gain
+//
+// VIRTUOSO ADE PSS SETUP:
+//   Fundamental frequency: fLO = 2.2 GHz (or beat freq if two-tone)
+//   Number of harmonics: 10
+//   tstab: 10n (allow LO to stabilize)
+//   Accuracy: moderate (balanced speed/accuracy)
+//
+// After PSS, run PAC (Periodic AC):
+//   Sweep: 100M to 300M (IF band around 200MHz)
+//   Input port: RF source
+//   Output: IFp-IFm differential
+//   Read CG at 200 MHz → should be > 6 dB
+// ============================================================
+// PSS_conversion pss fund=fLO tstab=10n harms=10 errpreset=moderate
+
+// ============================================================
+// SIMULATION 3: DSB Noise Figure (Pnoise after PSS)
+// Run PSS first (LO-driven), then Pnoise
+// DSB NF = 10·log10(total output noise / output noise from RF input only)
+// At 200 MHz IF: NF_DSB < 12 dB
+//
+// VIRTUOSO PNOISE SETUP (after PSS):
+//   Output: IFp (or IFp-IFm differential)
+//   Input reference: RF source port
+//   Sweep: 10M to 300M
+//   Read NF at 200 MHz
+// ============================================================
+
+// ============================================================
+// SIMULATION 4: IIP3 (Two-Tone PSS + PAC)
+// Two RF tones: f1 = 2.400 GHz, f2 = 2.401 GHz
+// IM3 at IF: 2(f1-fLO)-(f2-fLO) = 2×200M - 201M = 199 MHz
+//            2(f2-fLO)-(f1-fLO) = 2×201M - 200M = 202 MHz
+//
+// IIP3 (input-referred) = Pin_RF + (CG - IM3_gain) / 2
+// Expected: IIP3 > +5 dBm
+//
+// TWO-TONE SETUP:
+//   Replace Vrf_p/m with two-tone sources
+//   Vrf_tone1: freq=2.400G, amp=sweep (-40 to -10 dBm)
+//   Vrf_tone2: freq=2.401G, amp= same
+//   PSS: fund = GCD(2.4G, 2.401G, 2.2G) = 1MHz, harms=5000 (careful — slow)
+//   Alternative: use Shooting PSS with auto beat-freq detection
+// ============================================================
+// For IIP3, replace sources above:
+// Vrf_p_t1 (RFp GND) vsource type=sine freq=2.4G amp=3.16m   // -40 dBm
+// Vrf_p_t2 (RFp GND) ... (use PSS multi-tone in ADE GUI)
+
+// ============================================================
+// SIMULATION 5: Port Isolation (S-parameter)
+// Replace RF/LO sources with port elements for SP analysis
+// LO-RF isolation > 30 dB (S21 from LO port to RF port)
+// LO-IF isolation > 20 dB
+// ============================================================
+// Port_RF (RFp RFm) port r=100 num=1  (differential)
+// Port_LO (LOp LOm) port r=50  num=2  (differential)
+// Port_IF (IFp IFm) port r=1k  num=3  (differential)
+// Sparam sp start=100M stop=3G step=10M ports=[Port_RF Port_LO Port_IF]
+
+// ============================================================
+// Save nodes for debugging
+// ============================================================
+save VDD RFp RFm LOp LOm IFp IFm net_drain_m1 net_drain_m2 net_tail
+

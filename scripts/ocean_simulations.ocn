@@ -1,0 +1,357 @@
+; =============================================================================
+; FILE: ocean_simulations.ocn
+; TITLE: Cadence Ocean Script — Automated Simulations for RX Front-End
+; USAGE: In Virtuoso CIW: load("/path/to/ocean_simulations.ocn")
+;        Or from terminal: ocean -nograph -replay ocean_simulations.ocn
+; =============================================================================
+; Ocean is Cadence's SKILL-based scripting language for automating ADE sims.
+; This script automates all simulations for LNA, Mixer, IF Filter, and Cascade.
+; Modify the library/cell/view names to match your Virtuoso database.
+; =============================================================================
+
+; ── User Settings (MODIFY THESE) ──────────────────────────────────────────────
+let( (lib_name cell_lna cell_mix cell_filt cell_cascade results_dir)
+  lib_name      = "RxFrontEnd"       ; Your Virtuoso library name
+  cell_lna      = "LNA_TB"           ; LNA testbench cell
+  cell_mix      = "Mixer_TB"         ; Mixer testbench cell
+  cell_filt     = "IFFilter_TB"      ; IF Filter testbench cell
+  cell_cascade  = "Cascade_TB"       ; Full chain testbench cell
+  results_dir   = "/home/user/rx_frontend_results"  ; Output directory
+
+; ── Open results directory ──────────────────────────────────────────────────
+  createDir(results_dir)
+
+; =============================================================================
+; SECTION 1: LNA SIMULATIONS
+; =============================================================================
+  printf("\n========================================\n")
+  printf("  Running LNA Simulations...\n")
+  printf("========================================\n")
+
+  ; Open LNA testbench
+  openCellViewByType(lib_name cell_lna "schematic")
+
+  ; ── SIM 1A: LNA DC Operating Point ────────────────────────────────────────
+  printf("  [1/4] LNA DC Analysis...\n")
+  simulator('spectre)
+  design(lib_name cell_lna "schematic")
+  resultsDir(strcat(results_dir "/lna"))
+
+  analysis('dc ?saveOppoint t)
+  run()
+
+  ; Extract and print DC operating point
+  let( (VGS_M1 VDS_M1 ID_M1 VGS_M2 VDS_M2)
+    VGS_M1 = getData("XLNA:M1:vgs" ?result "dcOpInfo")
+    VDS_M1 = getData("XLNA:M1:vds" ?result "dcOpInfo")
+    ID_M1  = getData("XLNA:M1:id"  ?result "dcOpInfo")
+    VGS_M2 = getData("XLNA:M2:vgs" ?result "dcOpInfo")
+    VDS_M2 = getData("XLNA:M2:vds" ?result "dcOpInfo")
+    printf("  LNA DC Point:\n")
+    printf("    M1: VGS=%.3fV  VDS=%.3fV  ID=%.2fmA\n"
+           drGetPointValue(VGS_M1 0)
+           drGetPointValue(VDS_M1 0)
+           drGetPointValue(ID_M1 0)*1000)
+    printf("    M2: VGS=%.3fV  VDS=%.3fV\n"
+           drGetPointValue(VGS_M2 0)
+           drGetPointValue(VDS_M2 0))
+  )
+
+  ; ── SIM 1B: LNA S-Parameters (1-6 GHz) ───────────────────────────────────
+  printf("  [2/4] LNA S-Parameters...\n")
+  analysis('sp
+    ?start    "1G"
+    ?stop     "6G"
+    ?step     "10M"
+    ?ports    list("Port1" "Port2")
+    ?saveS    t
+  )
+  run()
+
+  ; Extract S21, S11 at 2.4 GHz
+  let( (S21_mag_dB S11_mag_dB K_factor)
+    S21_mag_dB = dB20(getData("/S21" ?result "sp"))
+    S11_mag_dB = dB20(getData("/S11" ?result "sp"))
+
+    printf("  LNA S-Parameters at 2.4 GHz:\n")
+    printf("    S21 = %.2f dB  (target: > 15 dB)\n"
+           value(S21_mag_dB 2.4e9))
+    printf("    S11 = %.2f dB  (target: < -10 dB)\n"
+           value(S11_mag_dB 2.4e9))
+
+    ; K-factor: K = (1 - |S11|² - |S22|² + |Δ|²) / (2|S12||S21|)
+    ; Virtuoso computes K automatically if stability enabled in ADE
+    ; Manual: use calculator expression or check ADE summary
+    printf("    K-factor: check ADE calculator → must be > 1 at all freqs\n")
+
+    ; Save S-param data to file
+    let( (fp)
+      fp = outfile(strcat(results_dir "/lna/lna_sparam.csv") "w")
+      fprintf(fp "Freq_GHz,S21_dB,S11_dB\n")
+      foreach( f list(1e9 1.5e9 2.0e9 2.4e9 3.0e9 4.0e9 5.0e9 6.0e9)
+        fprintf(fp "%.2f,%.3f,%.3f\n"
+                f/1e9
+                value(S21_mag_dB f)
+                value(S11_mag_dB f))
+      )
+      close(fp)
+      printf("    Saved: lna_sparam.csv\n")
+    )
+  )
+
+  ; ── SIM 1C: LNA Noise Figure ───────────────────────────────────────────────
+  printf("  [3/4] LNA Noise Figure...\n")
+  analysis('noise
+    ?start    "1G"
+    ?stop     "6G"
+    ?step     "10M"
+    ?iprobe   "Port1"
+    ?oprobe   "Port2"
+    ?donoise  t
+  )
+  run()
+
+  let( (NF_val)
+    NF_val = getData("NF" ?result "noise")
+    printf("  LNA NF at 2.4 GHz: %.2f dB  (target: < 2.5 dB)\n"
+           value(NF_val 2.4e9))
+  )
+
+  ; ── SIM 1D: LNA IIP3 (PSS + PAC) ─────────────────────────────────────────
+  printf("  [4/4] LNA IIP3 (PSS two-tone)...\n")
+  ; Note: for IIP3, you need two RF tones — this requires PSS
+  ; Set up in ADE GUI then save state, or use:
+  analysis('pss
+    ?fund     "1M"          ; Beat frequency = |f2 - f1| = 1 MHz
+    ?tstab    "200n"
+    ?harms    10
+    ?errpreset "moderate"
+  )
+  analysis('pac
+    ?start    "1G"
+    ?stop     "3G"
+    ?step     "10M"
+    ?maxsideband 3
+  )
+  run()
+
+  printf("  IIP3: Extract from ADE Calculator:\n")
+  printf("    1. Plot PAC output at RF and IM3 frequencies vs input power\n")
+  printf("    2. IIP3 = Pin + (Pfund - PIM3) / 2\n")
+  printf("    3. Or use 'iip3' function in Virtuoso Calculator\n")
+
+  printf("  LNA simulations complete.\n\n")
+)
+
+; =============================================================================
+; SECTION 2: MIXER SIMULATIONS
+; =============================================================================
+let( ()
+  printf("========================================\n")
+  printf("  Running Mixer Simulations...\n")
+  printf("========================================\n")
+
+  openCellViewByType(lib_name cell_mix "schematic")
+  simulator('spectre)
+  design(lib_name cell_mix "schematic")
+  resultsDir(strcat(results_dir "/mixer"))
+
+  ; ── SIM 2A: Mixer DC ─────────────────────────────────────────────────────
+  printf("  [1/3] Mixer DC Analysis...\n")
+  analysis('dc ?saveOppoint t)
+  run()
+
+  printf("  Check: all M1-M6 in saturation, VDS > VGS - Vth\n")
+  printf("  Tail current = %.2f mA\n"
+         abs(drGetPointValue(getData("XMIX:Mtail:id" ?result "dcOpInfo") 0))*1000)
+
+  ; ── SIM 2B: Mixer Conversion Gain (PSS + PAC) ────────────────────────────
+  printf("  [2/3] Mixer Conversion Gain (PSS)...\n")
+  ; PSS driven by LO at 2.2 GHz
+  ; RF port: port or small sine at 2.4 GHz
+  analysis('pss
+    ?fund     "2.2G"    ; LO frequency
+    ?tstab    "10n"
+    ?harms    10
+    ?errpreset "moderate"
+  )
+  ; PAC: small-signal at RF → extract conversion gain at IF (200 MHz)
+  analysis('pac
+    ?start    "100M"
+    ?stop     "300M"
+    ?step     "1M"
+    ?maxsideband 3
+  )
+  run()
+
+  printf("  Mixer Conversion Gain:\n")
+  printf("    Read PAC output at 200 MHz → should be > 6 dB\n")
+  printf("    IF+ - IF- differential output → add voltages in Calculator\n")
+
+  ; Pnoise for DSB NF
+  printf("  [3/3] Mixer Pnoise (DSB NF)...\n")
+  analysis('pnoise
+    ?start    "100M"
+    ?stop     "300M"
+    ?step     "1M"
+    ?iprobe   "Vrf_p"    ; Input referred to RF source
+    ?oprobe   "net_IFp"  ; Output at IF+
+    ?sweeptype "relative"
+    ?fund     "2.2G"
+  )
+  run()
+
+  printf("  Mixer DSB NF at 200 MHz: Read from ADE results (target < 12 dB)\n")
+  printf("  Mixer simulations complete.\n\n")
+)
+
+; =============================================================================
+; SECTION 3: IF FILTER SIMULATIONS
+; =============================================================================
+let( ()
+  printf("========================================\n")
+  printf("  Running IF Filter Simulations...\n")
+  printf("========================================\n")
+
+  openCellViewByType(lib_name cell_filt "schematic")
+  simulator('spectre)
+  design(lib_name cell_filt "schematic")
+  resultsDir(strcat(results_dir "/filter"))
+
+  ; ── SIM 3A: Filter DC ─────────────────────────────────────────────────────
+  printf("  [1/3] IF Filter DC...\n")
+  analysis('dc ?saveOppoint t)
+  run()
+
+  ; ── SIM 3B: AC Frequency Response ─────────────────────────────────────────
+  printf("  [2/3] IF Filter AC Sweep (50M-400M)...\n")
+  analysis('ac
+    ?start    "50M"
+    ?stop     "400M"
+    ?step     "1M"
+  )
+  run()
+
+  let( (Vout_ac freq_center gain_center BW_3dB att_40)
+    Vout_ac = getData("/net_OUT_p" ?result "ac")
+
+    ; Find gain at center frequency
+    gain_center = dB20(Vout_ac)
+    printf("  Filter Response:\n")
+    printf("    Gain at 200 MHz = %.2f dB  (target: insertion loss < 3 dB)\n"
+           value(gain_center 200e6))
+    printf("    Gain at 160 MHz = %.2f dB  (target: < -40 dB from peak)\n"
+           value(gain_center 160e6))
+    printf("    Gain at 240 MHz = %.2f dB  (target: < -40 dB from peak)\n"
+           value(gain_center 240e6))
+
+    ; Save frequency response
+    let( (fp f_vec)
+      fp    = outfile(strcat(results_dir "/filter/filter_ac.csv") "w")
+      fprintf(fp "Freq_MHz,Gain_dB\n")
+      f_vec = list(50e6 100e6 150e6 160e6 170e6 180e6 190e6 195e6 200e6
+                   205e6 210e6 220e6 230e6 240e6 250e6 300e6 350e6 400e6)
+      foreach(f f_vec
+        fprintf(fp "%.1f,%.3f\n" f/1e6 value(gain_center f))
+      )
+      close(fp)
+      printf("    Saved: filter_ac.csv\n")
+    )
+  )
+
+  ; ── SIM 3C: Transient (group delay check) ─────────────────────────────────
+  printf("  [3/3] IF Filter Transient...\n")
+  analysis('tran
+    ?stop     "200n"
+    ?maxstep  "100p"
+  )
+  run()
+
+  printf("  Examine transient output for overshoot (Q too high) or\n")
+  printf("  slow rise time (Q too low). Target: clean 50 ns settling.\n")
+  printf("  IF Filter simulations complete.\n\n")
+)
+
+; =============================================================================
+; SECTION 4: CASCADE SIMULATIONS
+; =============================================================================
+let( ()
+  printf("========================================\n")
+  printf("  Running Full Cascade Simulations...\n")
+  printf("========================================\n")
+
+  openCellViewByType(lib_name cell_cascade "schematic")
+  simulator('spectre)
+  design(lib_name cell_cascade "schematic")
+  resultsDir(strcat(results_dir "/cascade"))
+
+  ; ── SIM 4A: Cascade DC ───────────────────────────────────────────────────
+  printf("  [1/3] Cascade DC...\n")
+  analysis('dc ?saveOppoint t)
+  run()
+
+  ; Print total power consumption
+  let( (I_lna I_mix I_filt PDC_total)
+    I_lna  = abs(drGetPointValue(getData("Vsupply_lna:i" ?result "dc") 0))
+    I_mix  = abs(drGetPointValue(getData("Vsupply_mix:i" ?result "dc") 0))
+    I_filt = abs(drGetPointValue(getData("Vsupply_filt:i" ?result "dc") 0))
+    PDC_total = 1.8 * (I_lna + I_mix + I_filt)
+    printf("  Power Consumption:\n")
+    printf("    LNA:    %.2f mA  = %.2f mW\n" I_lna*1000 1.8*I_lna*1000)
+    printf("    Mixer:  %.2f mA  = %.2f mW\n" I_mix*1000 1.8*I_mix*1000)
+    printf("    Filter: %.2f mA  = %.2f mW\n" I_filt*1000 1.8*I_filt*1000)
+    printf("    TOTAL:  %.2f mW\n" PDC_total*1000)
+  )
+
+  ; ── SIM 4B: Cascade Conversion Gain (PSS+PAC) ────────────────────────────
+  printf("  [2/3] Cascade Conversion Gain...\n")
+  analysis('pss
+    ?fund     "200M"   ; IF frequency as beat
+    ?tstab    "20n"
+    ?harms    15
+    ?errpreset "moderate"
+  )
+  analysis('pac
+    ?start    "100M"
+    ?stop     "300M"
+    ?step     "1M"
+    ?maxsideband 5
+  )
+  run()
+
+  printf("  Cascade gain at 200 MHz IF: read from PAC output\n")
+  printf("  Expected: ~19 dB total (15 LNA + 6 Mixer - 2 Filter)\n")
+
+  ; ── SIM 4C: Cascade Pnoise (Total NF) ────────────────────────────────────
+  printf("  [3/3] Cascade Noise Figure (Pnoise)...\n")
+  analysis('pnoise
+    ?start    "100M"
+    ?stop     "300M"
+    ?step     "1M"
+    ?iprobe   "Rsi"          ; Input noise source
+    ?oprobe   "net_OUT_p"    ; Cascade output
+    ?sweeptype "relative"
+    ?fund     "200M"
+  )
+  run()
+
+  printf("  Cascade NF at 200 MHz: read from Pnoise results\n")
+  printf("  Target: < 4 dB (Friis predicts 3.1 dB)\n")
+  printf("  Full cascade simulations complete.\n")
+)
+
+; =============================================================================
+; SECTION 5: RESULTS SUMMARY
+; =============================================================================
+printf("\n")
+printf("╔══════════════════════════════════════════════════════════════════╗\n")
+printf("║  SIMULATION COMPLETE — Results saved to:                       ║\n")
+printf("║  %s                ║\n" results_dir)
+printf("╠══════════════════════════════════════════════════════════════════╣\n")
+printf("║  Files generated:                                               ║\n")
+printf("║    lna/lna_sparam.csv    — S-parameter sweep                   ║\n")
+printf("║    filter/filter_ac.csv  — Frequency response                  ║\n")
+printf("║  Open ADE results for PSS/Pnoise/IIP3 waveforms                ║\n")
+printf("╚══════════════════════════════════════════════════════════════════╝\n")
+
+; End of Ocean script

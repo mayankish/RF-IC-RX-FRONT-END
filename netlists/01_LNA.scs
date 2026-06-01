@@ -1,0 +1,184 @@
+// =============================================================================
+// FILE: 01_LNA.scs
+// TITLE: 2.4 GHz Cascode LNA — Inductive Source Degeneration
+// PROCESS: Generic 180nm CMOS (substitute your PDK model path below)
+// AUTHOR: RF RX Front-End Project
+//
+// TARGET SPECS:
+//   S21  > 15 dB
+//   S11  < -10 dB at 2.4 GHz
+//   NF   < 2.5 dB
+//   IIP3 > -5 dBm
+//   K    > 1 (unconditionally stable)
+//   PDC  < 10 mW at VDD=1.8V
+//
+// TOPOLOGY:
+//   VDD
+//    |
+//   Ld (4.7 nH, drain load resonator)
+//    |
+//   M2 (cascode NMOS — improves isolation & reverse gain)
+//    |
+//   M1 (main transconductor NMOS)
+//    |
+//   Ls (0.7 nH, sets Re[Zin]=50Ω via ωT·Ls)
+//    |
+//   GND
+//
+//   Input: Lg (12 nH) + Cgs(M1) + Ls forms series resonance at 2.4 GHz
+// =============================================================================
+
+// ---- Model include (REPLACE with your actual PDK path) -----
+// include "/opt/pdk/tsmc180nm/models/spectre/tt.scs" section=tt
+// Example for a generic BSIM3v3 model:
+// include "~/cadence/models/bsim3v3.scs"
+// ----------------------------------------------------------
+
+// ============================================================
+// GLOBAL PARAMETERS — tune these for your process corner
+// ============================================================
+parameters
++ VDD    = 1.8        // Supply voltage (V)
++ Vbias1 = 0.72       // M1 gate bias — sets ID via current mirror or resistive divider
++ Vbias2 = 1.2        // M2 (cascode) gate bias
++ W1     = 200u       // M1 width (40 fingers × 5μm — multi-finger for low gate resistance)
++ W2     = 200u       // M2 width (match M1)
++ L_mos  = 180n       // Channel length (use minimum for highest fT)
++ NF     = 40         // Number of fingers
++ Ls_val = 0.7n       // Source degeneration inductor (bond wire or on-chip spiral)
++ Lg_val = 12n        // Gate inductor (off-chip or bond wire — tune for S11 minimum)
++ Ld_val = 4.7n       // Drain load inductor (resonates with Cds+Cload at 2.4 GHz)
++ Qls    = 15         // Q of Ls (bond wire Q ≈ 15-25)
++ Qlg    = 8          // Q of Lg (off-chip Q ≈ 8-15, on-chip Q ≈ 5-8)
++ Qld    = 7          // Q of Ld (on-chip spiral)
++ Cpad   = 100f       // Input pad parasitic capacitance (estimate from layout)
++ Cbp    = 10p        // Bypass capacitor value
+
+// ============================================================
+// SUBCIRCUIT DEFINITION
+// Ports: RF_in  — RF input (50Ω referenced)
+//        IF_out — LNA output → connects to mixer RF port
+//        VDD    — Power supply
+//        GND    — Ground
+// ============================================================
+subckt LNA (RF_in IF_out VDD GND)
+
+  // ---- Input pad parasitic ----
+  Cpad  (RF_in GND)         capacitor   c=Cpad
+
+  // ---- Gate matching inductor (off-chip, bond wire or PCB trace) ----
+  Lg    (RF_in  net_gate1)  inductor    l=Lg_val q=Qlg
+
+  // ---- Main transconductor (M1) ----
+  // nf=NF sets multi-finger layout; adjust w= to total width
+  M1    (net_d1  net_gate1  net_Ls  GND)  nmos  w=W1  l=L_mos  nf=NF
+
+  // ---- Source degeneration inductor ----
+  Ls    (net_Ls  GND)       inductor    l=Ls_val  q=Qls
+
+  // ---- Cascode device (M2) ----
+  M2    (IF_out  net_bias2  net_d1  GND)  nmos  w=W2  l=L_mos  nf=NF
+
+  // ---- Drain load inductor ----
+  Ld    (VDD    IF_out)     inductor    l=Ld_val  q=Qld
+
+  // ---- Bias network (resistive divider) ----
+  // M1 gate bias
+  Rbias1_top  (VDD       net_bias1_mid)  resistor  r=20k
+  Rbias1_bot  (net_bias1_mid  GND)       resistor  r=15k
+  // Connect gate bias through large resistor (RF choke)
+  Rbias1_chk  (net_bias1_mid  net_gate1) resistor  r=5k
+  Cbp_g1      (net_gate1  GND)           capacitor c=Cbp  // AC bypass
+
+  // M2 cascode bias
+  Rbias2_top  (VDD       net_bias2)      resistor  r=15k
+  Rbias2_bot  (net_bias2  GND)           resistor  r=10k
+  Cbp_g2      (net_bias2  GND)           capacitor c=Cbp
+
+  // VDD bypass (keep RF off supply rail)
+  Cbp_vdd     (VDD  GND)                 capacitor c=Cbp
+
+ends LNA
+
+// ============================================================
+// TEST BENCH — Instantiate LNA in simulation environment
+// ============================================================
+
+// Power supply
+Vsupply (VDD GND) vsource type=dc dc=VDD
+
+// RF input port (50Ω system impedance)
+// For S-parameter sim: use port element
+Port1 (RF_in GND) port r=50 num=1
+
+// Output port (load for S-param / input to mixer)
+Port2 (IF_out GND) port r=50 num=2
+
+// Instantiate LNA
+XLNA (RF_in IF_out VDD GND) LNA
+
+// ============================================================
+// SIMULATION 1: DC Operating Point
+// Run this first to verify bias before any RF simulation
+// Key checks:
+//   VGS_M1 ≈ 0.65-0.75V (ensure in saturation)
+//   VDS_M1 > VGS_M1 - Vth (saturation: VDS > Vov ≈ 0.2-0.3V)
+//   ID_M1 ≈ 4-6 mA (power budget check)
+//   VGS_M2 ≈ 1.2V, VDS_M2 > VGS_M2 - Vth
+// ============================================================
+DC_OP dc
+
+// ============================================================
+// SIMULATION 2: S-Parameters (1 GHz to 6 GHz)
+// Extract: S21 (gain), S11 (input match), S12 (isolation), K (stability)
+// Target at 2.4 GHz:
+//   S21 > 15 dB
+//   S11 < -10 dB
+//   S12 < -25 dB
+//   K   > 1
+// ============================================================
+Sparam sp start=1G stop=6G step=10M ports=[Port1 Port2]
+
+// ============================================================
+// SIMULATION 3: Noise Figure vs Frequency
+// Reports noise figure (NF) at each frequency
+// At 2.4 GHz: NF < 2.5 dB
+// ============================================================
+Noise noise start=1G stop=6G step=10M iprobe=Port1 oprobe=Port2 \
+  donoise=yes
+
+// ============================================================
+// SIMULATION 4: IIP3 via Two-Tone PSS + PAC
+// Two tones at f1=2.400GHz, f2=2.401GHz (Δf=1MHz)
+// IM3 products at 2f1-f2=2.399GHz, 2f2-f1=2.402GHz
+// IIP3 = Pin + (Pout_fundamental - Pout_IM3) / 2
+//
+// PROCEDURE IN VIRTUOSO:
+//   1. Set up PSS with fund=1MHz (beat frequency), tstab=200n
+//   2. Add two harmonic sources at 2.4G and 2.401G
+//   3. Run PAC for IM3 extraction
+//   4. Use Calculator: IIP3 from fundamental and IM3 curves
+// ============================================================
+
+// Two-tone source (uncomment for IIP3 sim — disable Port1 first)
+// Vrf_tone1  (RF_in_t1  GND)  vsource type=sine freq=2.4G amp=-30dbm
+// Vrf_tone2  (RF_in_t2  GND)  vsource type=sine freq=2.401G amp=-30dbm
+// Vrf_sum    (RF_in  GND)     vsource ... (use multi-tone PSS setup in GUI)
+
+// PSS setup (set in Virtuoso ADE — not netlist syntax):
+// PSS: fund = 1MHz, num harmonics = 10, tstab = 200n, maxstep = 10p
+// PAC: freq sweep 0 to 3G, input port = RF source
+
+// ============================================================
+// SIMULATION 5: P1dB Compression (PSS sweep)
+// Sweep input power from -40 dBm to 0 dBm
+// P1dB is where gain drops 1 dB from small-signal value
+// Expected P1dB ≈ -15 to -10 dBm for this topology
+// ============================================================
+// (Set in ADE as PSS sweep of source amplitude)
+
+// ============================================================
+// SIMULATION CONTROL — Save all node voltages
+// ============================================================
+save VDD RF_in IF_out net_gate1 net_d1 net_Ls net_bias2
+

@@ -1,0 +1,247 @@
+// =============================================================================
+// FILE: 03_IF_Filter.scs
+// TITLE: 4th-Order Gm-C Bandpass Filter — 200 MHz Center, 20 MHz BW
+// PROCESS: Generic 180nm CMOS
+// AUTHOR: RF RX Front-End Project
+//
+// TARGET SPECS:
+//   Center frequency (f0):  200 MHz ± 1%
+//   3-dB bandwidth (BW):    20 MHz (matching OFDM 20 MHz channel)
+//   Passband ripple:        < 0.5 dB
+//   Stopband attenuation:   > 40 dB at ±40 MHz from center (i.e., at 160 & 240 MHz)
+//   Insertion loss:         < 3 dB
+//   IIP3:                   > +10 dBm
+//   PDC:                    < 20 mW
+//
+// THEORY OF OPERATION:
+//   At 200 MHz, passive LC filters require nH-range inductors that are impractical
+//   on-chip (typically need 10-100 nH for 200 MHz; on-chip spirals max ≈ 10-20 nH
+//   with poor Q). Gm-C replaces inductors with OTA (Gm cell) + capacitor pairs.
+//
+//   A Gm-C biquad section (2nd order) is built as:
+//
+//       ┌────Gm1──────────────────┐
+//       │                         │ (integrator 1)
+//      IN ─►─[C1]─►─Gm2─►─[C2]─►─ OUT
+//                   │              │
+//                   └──────Gm3────┘ (Q control / loss compensation)
+//                   │              │
+//                   └──────Gm4────┘ (bandpass tap)
+//
+//   Two such biquads in cascade give 4th-order Butterworth bandpass response.
+//
+// 4TH-ORDER BUTTERWORTH BANDPASS DESIGN:
+//   Split into two 2nd-order sections with different Q factors:
+//     Section 1 (lower Q):  Q1 = 3.5
+//     Section 2 (higher Q): Q2 = 8.5
+//   Both centered at f0 = 200 MHz
+//
+// GM CELL VALUES:
+//   For a 2nd-order Gm-C BPF biquad:
+//     ω0 = √(Gm1·Gm2) / C     → f0 = 200 MHz
+//     Q  = ω0·C / Gm3          → bandwidth = f0/Q
+//
+//   Design choice: C = 500 fF (on-chip MIM capacitor, practical size)
+//     ω0 = 2π × 200 MHz = 1.2566 × 10⁹ rad/s
+//     Gm1 = Gm2 = ω0 × C = 1.2566e9 × 500e-15 = 628 μA/V
+//
+//   Section 1 (Q1 = 3.5):
+//     Gm3_1 = ω0 × C / Q1 = 1.2566e9 × 500e-15 / 3.5 = 179 μA/V
+//
+//   Section 2 (Q2 = 8.5):
+//     Gm3_2 = ω0 × C / Q2 = 1.2566e9 × 500e-15 / 8.5 = 73.9 μA/V
+//
+//   Note: Gm cells are tunable via bias current. Fine-tune in simulation.
+// =============================================================================
+
+// ---- Model include ----
+// include "/opt/pdk/tsmc180nm/models/spectre/tt.scs" section=tt
+
+// ============================================================
+// GLOBAL PARAMETERS
+// ============================================================
+parameters
++ VDD   = 1.8
++ VCM   = 0.9           // Common-mode voltage (VDD/2 for symmetric swing)
++ C_val = 500f          // Integration capacitor (MIM or MOM capacitor)
++ Gm0   = 628u          // Base transconductance = ω0 × C (for f0=200MHz, C=500fF)
++ Gm_Q1 = 179u          // Q-control Gm for biquad 1 (Q=3.5)
++ Gm_Q2 = 74u           // Q-control Gm for biquad 2 (Q=8.5)
+
+// ============================================================
+// GmCell SUBCIRCUIT — Differential OTA (Operational Transconductor)
+// Simple differential pair with tail current — tune ID for target Gm
+//
+// Gm ≈ √(2 × μn×Cox × W/L × ID) for long-channel NMOS
+//   Target Gm = 628 μA/V:
+//   With W=20μm, L=180nm: kn ≈ 270μA/V² × (20/0.18) = 30 mA/V²
+//   ID = Gm² / (2 × kn) = (628e-6)² / (2 × 30e-3) = 6.6 μA
+//   Hmm too low — use W=5μm, L=500nm for better linearity trade-off:
+//   kn = 270μA/V² × (5/0.5) = 2.7 mA/V²
+//   ID = (628e-6)² / (2 × 2.7e-3) = 73 μA per cell — reasonable
+//
+// PMOS load (diode-connected) or PMOS current mirror for active load
+// Ports: INp, INm — differential input
+//        OUTp, OUTm — differential output
+//        VDD, GND — supply
+//        IBIAS — bias current input (from current mirror)
+// ============================================================
+subckt GmCell_diff (INp INm OUTp OUTm VDD GND IBIAS)
+parameters Gm_target=628u
+
+  // NMOS differential pair
+  Mn1  (OUTm  INp  net_tail_gm  GND)  nmos  w=5u  l=500n  nf=2
+  Mn2  (OUTp  INm  net_tail_gm  GND)  nmos  w=5u  l=500n  nf=2
+
+  // PMOS active load (current mirror)
+  Mp1  (OUTm  OUTm  VDD  VDD)  pmos  w=8u  l=500n  nf=2  // diode-connected
+  Mp2  (OUTp  OUTm  VDD  VDD)  pmos  w=8u  l=500n  nf=2  // mirror output
+
+  // Tail current source
+  Mtail  (net_tail_gm  IBIAS  GND  GND)  nmos  w=4u  l=500n  nf=2
+
+  // Common-mode feedback (simplified — use ideal CMFB in first pass)
+  // Full CMFB circuit needed for proper CM stabilization
+  Rcmfb_p  (OUTp  net_cm_sense)  resistor  r=20k
+  Rcmfb_m  (OUTm  net_cm_sense)  resistor  r=20k
+  // net_cm_sense tracks output CM; feed back to tail CMFB amp (not shown)
+  // For first simulation, use ideal voltage source at output CM
+
+ends GmCell_diff
+
+// ============================================================
+// BIQUAD SUBCIRCUIT — 2nd Order Gm-C Bandpass Section
+//
+// Transfer function: H(s) = (Gm1/C) × s / (s² + (Gm3/C)×s + Gm1×Gm2/C²)
+//   ω0 = √(Gm1×Gm2)/C,  Q = ω0×C/Gm3,  Peak gain = Gm1/Gm3 = Q
+//
+// Ports: IN — input signal
+//        OUT — bandpass output
+//        VDD, GND
+//        Ibias0 — bias for Gm1, Gm2 (sets ω0)
+//        IbiasQ — bias for Gm3 (sets Q)
+// ============================================================
+subckt BPF_Biquad (INp INm OUTp OUTm VDD GND Ibias0 IbiasQ)
+
+  // Gm1: input transconductor → drives integrator 1
+  XGm1  (INp INm  net_int1p net_int1m  VDD GND Ibias0)  GmCell_diff
+
+  // C1: integration capacitors (integrator 1 output)
+  C1p  (net_int1p  VCM_ref)  capacitor  c=C_val
+  C1m  (net_int1m  VCM_ref)  capacitor  c=C_val
+
+  // Gm2: integrator 2 — driven by integrator 1 output → produces bandpass
+  XGm2  (net_int1p net_int1m  OUTp OUTm  VDD GND Ibias0)  GmCell_diff
+
+  // C2: integration capacitors (integrator 2 = BPF output)
+  C2p  (OUTp  VCM_ref)  capacitor  c=C_val
+  C2m  (OUTm  VCM_ref)  capacitor  c=C_val
+
+  // Gm3: Q-control feedback (output fed back to integrator 1 input)
+  // This sets the Q = ω0×C/Gm3
+  XGm3  (OUTp OUTm  net_int1p net_int1m  VDD GND IbiasQ)  GmCell_diff
+
+  // Gm4: feedthrough from input to output (for bandpass gain = Gm1/Gm3)
+  // (included implicitly — adjust topology for exact gain normalization)
+
+  // VCM reference for capacitor bottom plates
+  VCM_ref  (VCM_ref  GND)  vsource  type=dc  dc=VCM
+
+ends BPF_Biquad
+
+// ============================================================
+// 4TH-ORDER BANDPASS FILTER (two cascaded biquads)
+// ============================================================
+subckt BPF_4thOrder (INp INm OUTp OUTm VDD GND)
+
+  // Bias current sources
+  // Ibias0: sets Gm0 = 628 μA/V for f0 = 200 MHz
+  Vbias0   (net_bias0  GND)  vsource  type=dc  dc=0.6   // adjust for target ID
+  Mbias0   (net_Ibias0  net_bias0  GND  GND)  nmos  w=4u  l=500n
+  // (replicate for each Gm cell — use current mirror tree in full design)
+
+  // Biquad 1: Q = 3.5
+  // Gm3_1 = Gm0/Q1 = 628μ/3.5 = 179 μA/V
+  // Achieved by scaling W of Gm3: W_Q1 = W0 × (179/628) ≈ 0.285 × W0
+  Vbias_Q1  (net_biasQ1  GND)  vsource  type=dc  dc=0.52  // tune for Gm_Q1
+  MbiasQ1   (net_IbiasQ1  net_biasQ1  GND  GND)  nmos  w=1.5u  l=500n
+
+  XBPF1  (INp INm  net_mid_p net_mid_m  VDD GND net_Ibias0 net_IbiasQ1) BPF_Biquad
+
+  // Biquad 2: Q = 8.5
+  // Gm3_2 = Gm0/Q2 = 628μ/8.5 = 73.9 μA/V
+  Vbias_Q2  (net_biasQ2  GND)  vsource  type=dc  dc=0.48  // tune for Gm_Q2
+  MbiasQ2   (net_IbiasQ2  net_biasQ2  GND  GND)  nmos  w=0.6u  l=500n
+
+  XBPF2  (net_mid_p net_mid_m  OUTp OUTm  VDD GND net_Ibias0 net_IbiasQ2) BPF_Biquad
+
+ends BPF_4thOrder
+
+// ============================================================
+// TEST BENCH
+// ============================================================
+
+Vsupply  (VDD GND)  vsource  type=dc  dc=VDD
+
+// IF input: differential source from mixer output
+// Use single-ended with ideal balun, or true differential
+Vin_p  (INp GND)  vsource  type=sine  freq=200M  amp=10m
+Vin_m  (INm GND)  vsource  type=sine  freq=200M  amp=-10m
+
+// Output load (represents ADC input capacitance)
+Rout_p  (OUTp GND)  resistor  r=10k
+Rout_m  (OUTm GND)  resistor  r=10k
+Cout_p  (OUTp GND)  capacitor  c=200f
+Cout_m  (OUTm GND)  capacitor  c=200f
+
+// Instantiate filter
+XFILT  (INp INm OUTp OUTm VDD GND)  BPF_4thOrder
+
+// ============================================================
+// SIMULATION 1: DC Operating Point
+// Verify: all OTA transistors in saturation
+//         VCM at output ≈ VDD/2 (if CMFB is correct)
+//         Total current ≈ 10-15 mA
+// ============================================================
+DC_OP dc
+
+// ============================================================
+// SIMULATION 2: AC Frequency Response (key simulation)
+// Sweep 50 MHz to 400 MHz — observe bandpass response
+// Check at 200 MHz:
+//   |H(j2π×200M)| → passband gain (should be ≈ 0 dB or small loss)
+// Check at 160 MHz and 240 MHz (±40 MHz from center):
+//   Attenuation > 40 dB (stopband spec)
+// Measure 3-dB frequencies → BW should be 190-210 MHz range (20 MHz BW)
+// ============================================================
+AC_sweep ac start=50M stop=400M step=1M
+
+// ============================================================
+// SIMULATION 3: Transient — Group Delay Check
+// Apply 20 MHz bandwidth square wave at IF
+// Observe step response: overshoot indicates Q is too high
+// OFDM is sensitive to group delay variation across band:
+//   Target: group delay variation < ±10 ns across 20 MHz passband
+// ============================================================
+Tran_check tran stop=100n maxstep=100p
+
+// ============================================================
+// SIMULATION 4: Output Noise
+// Run noise analysis after AC
+//   Input-referred noise at 200 MHz should be:
+//   Vn_in < 10 nV/√Hz (for SNR budget)
+// ============================================================
+Noise_filter noise start=50M stop=400M step=1M \
+  iprobe=Vin_p oprobe=OUTp
+
+// ============================================================
+// SIMULATION 5: IIP3 of Filter
+// Two tones at 199 MHz and 201 MHz (in-band, Δf=2 MHz)
+// IM3 at 197 MHz and 203 MHz (in-band → sets filter IIP3)
+// Expected IIP3 > +10 dBm (filter is linear, IIP3 mainly limits ADC headroom)
+// ============================================================
+// Vt1 (INp GND) vsource type=sine freq=199M amp=100m
+// Vt2 (INp GND) ... (use two-tone PSS)
+
+save VDD INp INm OUTp OUTm net_mid_p net_mid_m
+
