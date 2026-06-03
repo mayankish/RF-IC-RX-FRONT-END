@@ -1,4 +1,7 @@
 # 2.4 GHz RF Receiver Front-End — Analog IC Design
+
+![Visitors](https://api.visitorbadge.io/api/visitors?path=https%3A%2F%2Fgithub.com%2Fmayankish%2FRF-IC-RX-FRONT-END&countColor=%23263759)
+
 ### Cadence Virtuoso · Spectre RF · 180 nm CMOS · 1.8 V
 
 > **Analog verification layer for a 64-subcarrier OFDM PHY baseband.**
