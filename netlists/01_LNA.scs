@@ -1,7 +1,7 @@
 // =============================================================================
 // FILE: 01_LNA.scs
 // TITLE: 2.4 GHz Cascode LNA — Inductive Source Degeneration
-// PROCESS: Generic 180nm CMOS (substitute your PDK model path below)
+// PROCESS: Generic 180nm CMOS 
 // AUTHOR: RF RX Front-End Project
 //
 // TARGET SPECS:
