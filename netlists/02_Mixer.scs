@@ -1,7 +1,7 @@
 // =============================================================================
 // FILE: 02_Mixer.scs
 // TITLE: 2.4 GHz Double-Balanced Gilbert Cell Mixer
-// PROCESS: Generic 180nm CMOS (substitute your PDK model path)
+// PROCESS: Generic 180nm CMOS 
 // AUTHOR: RF RX Front-End Project
 //
 // TARGET SPECS:
@@ -13,29 +13,13 @@
 //   PDC                   < 15 mW at VDD=1.8V
 //
 // TOPOLOGY (Double-Balanced Gilbert Cell):
-//
-//        VDD
-//         |
-//    RL+ ─┤├─ RL-        ← Load resistors (IF output taken differentially)
-//    |           |
-//   IF+         IF-      ← Differential IF output at 200 MHz
-//    |    ┌─────┤
-//   M5───M3   M4───M6    ← LO switching quad
-//    └─────┤   ├─────┘
-//          |   |
-//         M1   M2        ← RF transconductance pair (gm stage)
-//          \   /
-//           ISS           ← Tail current source (sets operating point)
-//            |
-//           GND
-//
 // SIGNAL FLOW:
 //   RF input (diff) → M1,M2 converts V to I (Gm stage)
 //   LO switching quad M3-M6 commutates RF current at LO frequency
 //   IF output = RF current × LO square wave → mixing product at fRF-fLO
 // =============================================================================
 
-// ---- Model include (REPLACE with your PDK path) ----
+// ---- Model include----
 // include "/opt/pdk/tsmc180nm/models/spectre/tt.scs" section=tt
 // ----------------------------------------------------
 
