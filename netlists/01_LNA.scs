@@ -28,7 +28,7 @@
 //   Input: Lg (12 nH) + Cgs(M1) + Ls forms series resonance at 2.4 GHz
 // =============================================================================
 
-// ---- Model include (REPLACE with your actual PDK path) -----
+// ---- Model include -----
 // include "/opt/pdk/tsmc180nm/models/spectre/tt.scs" section=tt
 // Example for a generic BSIM3v3 model:
 // include "~/cadence/models/bsim3v3.scs"
